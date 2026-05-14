@@ -1,26 +1,131 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+@theme {
+  /* Orbitwatch — Mission Control Design System */
+  --color-background: #0a0e14;
+  --color-surface: #0f1419;
+  --color-row-hover: #141b24;
+  --color-border: #1e2733;
+  --color-primary: #cdd9e5;
+  --color-secondary: #768390;
+  --color-accent-blue: #388bfd;
+
+  /* Functional status colors */
+  --color-status-ok: #3fb950;
+  --color-status-warn: #d29922;
+  --color-status-error: #f85149;
+
+  /* Tailwind theme overrides */
+  --color-foreground: #cdd9e5;
+  --color-card: #0f1419;
+  --color-card-foreground: #cdd9e5;
+  --color-muted: #0f1419;
+  --color-muted-foreground: #768390;
+  --color-destructive: #f85149;
+  --color-input: #0f1419;
+  --color-ring: #388bfd;
+  --radius: 2px;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+@layer base {
+  * {
+    border-color: var(--color-border);
   }
-}
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  body {
+    background-color: var(--color-background);
+    color: var(--color-primary);
+    font-family: 'Inter', var(--font-sans), system-ui, sans-serif;
+    font-feature-settings: "ss01", "cv01";
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Scanline texture overlay — subtle terminal/ops feel */
+  body::before {
+    content: '';
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 9999;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 1px,
+      rgba(255, 255, 255, 0.03) 1px,
+      rgba(255, 255, 255, 0.03) 2px
+    );
+  }
+
+  /* Monospace utility class for data values */
+  .font-data {
+    font-family: 'JetBrains Mono', var(--font-mono), monospace;
+  }
+
+  /* Status dot sizes */
+  .status-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .status-dot-sm {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  /* Scrollbar styling */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: var(--color-background);
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-border);
+    border-radius: 3px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-secondary);
+  }
+
+  /* No rounded corners > 4px */
+  .rounded-xl,
+  .rounded-lg,
+  .rounded-2xl,
+  .rounded-3xl {
+    border-radius: 2px !important;
+  }
+
+  /* Kill all box shadows */
+  .shadow,
+  .shadow-sm,
+  .shadow-md,
+  .shadow-lg,
+  .shadow-xl,
+  .shadow-2xl {
+    box-shadow: none !important;
+  }
+
+  /* Pulsing live indicator */
+  @keyframes pulse-live {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  .pulse-live {
+    animation: pulse-live 2s ease-in-out infinite;
+  }
 }
