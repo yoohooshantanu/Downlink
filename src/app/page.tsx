@@ -32,12 +32,12 @@ export default function Home() {
         style={{ borderBottom: "1px solid #1e2733", backgroundColor: "#0f1419" }}
       >
         <div className="flex items-center" style={{ gap: "10px" }}>
-          <img src="/logo.png" alt="Orbitwatch Logo" style={{ width: "24px", height: "auto" }} />
+          <img src="/logo.png" alt="Downlink Logo" style={{ width: "24px", height: "auto" }} />
           <span
             className="text-sm tracking-tight"
             style={{ color: "#cdd9e5", fontWeight: 600 }}
           >
-            Orbitwatch
+            Downlink
           </span>
           <span className="text-xs" style={{ color: "#768390" }}>
             Ground Station Telemetry

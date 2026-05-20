@@ -15,7 +15,7 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Orbitwatch — Ground Station Telemetry",
+  title: "Downlink - Ground Station Telemetry",
   description: "SatNOGS Telemetry Intelligence Platform",
 };
 

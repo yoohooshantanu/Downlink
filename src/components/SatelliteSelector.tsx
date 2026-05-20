@@ -1,9 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { fetchSatellites, fetchAnomaliesCount } from "@/lib/api";
+import { fetchSatellites } from "@/lib/api";
 import { getFlagEmoji } from "@/lib/utils";
 
 // Color constants — exact spec
@@ -20,39 +19,47 @@ const C = {
   red: "#f85149",
 };
 
+interface SatelliteRow {
+  norad_id: number;
+  name?: string;
+  operator?: string;
+  countries?: string;
+  status?: string;
+  fetched_at?: string;
+  has_telemetry?: boolean;
+  parameter_count?: number;
+}
+
+function formatUtcTimestamp(value: string | undefined): string {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return `${date.toISOString().slice(0, 19).replace("T", " ")}Z`;
+}
+
 export default function SatelliteSelector() {
   const router = useRouter();
-  const [satellites, setSatellites] = useState<any[]>([]);
-  const [anomalyCounts, setAnomalyCounts] = useState<Record<number, number>>({});
+  const [satellites, setSatellites] = useState<SatelliteRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
-  const [telemetryOnly, setTelemetryOnly] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [reloadTick, setReloadTick] = useState(0);
 
   useEffect(() => {
     async function load() {
       try {
         const data = await fetchSatellites();
-        const sats = data.satellites || [];
-        setSatellites(sats);
-
-        // Fetch anomaly counts for satellites with telemetry (non-blocking)
-        const withTelemetry = sats.filter((s: any) => s.has_telemetry);
-        const counts: Record<number, number> = {};
-        await Promise.allSettled(
-          withTelemetry.map(async (s: any) => {
-            const count = await fetchAnomaliesCount(s.norad_id);
-            counts[s.norad_id] = count;
-          })
-        );
-        setAnomalyCounts(counts);
+        setSatellites(data.satellites || []);
+        setLoadError(null);
       } catch (err) {
         console.error(err);
+        setLoadError("Unable to load satellites. Check backend connectivity and retry.");
       } finally {
         setLoading(false);
       }
     }
     load();
-  }, []);
+  }, [reloadTick]);
 
   if (loading) {
     return (
@@ -64,12 +71,28 @@ export default function SatelliteSelector() {
     );
   }
 
+  if (loadError && satellites.length === 0) {
+    return (
+      <div className="flex h-[50vh] items-center justify-center px-4">
+        <div className="max-w-xl rounded border border-border bg-card p-4 text-sm text-muted-foreground">
+          <div className="mb-3">{loadError}</div>
+          <button
+            type="button"
+            onClick={() => {
+              setLoading(true);
+              setReloadTick((v) => v + 1);
+            }}
+            className="rounded border border-border px-3 py-1 text-xs text-foreground hover:bg-[#1c2128]"
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   // Apply filters
   let filtered = satellites;
-
-  if (telemetryOnly) {
-    filtered = filtered.filter((s) => s.has_telemetry);
-  }
 
   if (searchQuery.trim() !== "") {
     const q = searchQuery.toLowerCase();
@@ -87,7 +110,9 @@ export default function SatelliteSelector() {
     if (b.norad_id === 39444) return 1;
     if (a.has_telemetry && !b.has_telemetry) return -1;
     if (!a.has_telemetry && b.has_telemetry) return 1;
-    return 0;
+    const byName = (a.name || "").localeCompare(b.name || "", undefined, { sensitivity: "base" });
+    if (byName !== 0) return byName;
+    return a.norad_id - b.norad_id;
   });
 
   return (
@@ -113,18 +138,6 @@ export default function SatelliteSelector() {
           onFocus={(e) => (e.target.style.borderColor = C.blue)}
           onBlur={(e) => (e.target.style.borderColor = C.border)}
         />
-        <label
-          className="flex items-center cursor-pointer select-none"
-          style={{ gap: "6px", fontSize: "12px", color: C.secondary, whiteSpace: "nowrap" }}
-        >
-          <input
-            type="checkbox"
-            style={{ accentColor: C.blue, width: "12px", height: "12px" }}
-            checked={telemetryOnly}
-            onChange={(e) => setTelemetryOnly(e.target.checked)}
-          />
-          Telemetry only
-        </label>
       </div>
 
       {/* Table — no outer card or border */}
@@ -168,8 +181,6 @@ export default function SatelliteSelector() {
         </thead>
         <tbody>
           {sorted.map((sat) => {
-            const anomalyCount = anomalyCounts[sat.norad_id] || 0;
-            const hasAnomalies = anomalyCount > 0;
             const flag = getFlagEmoji(sat.countries);
 
             return (
@@ -180,9 +191,17 @@ export default function SatelliteSelector() {
                   borderBottom: `1px solid ${C.border}`,
                   cursor: "pointer",
                   transition: "background-color 0.15s",
-                  borderLeft: hasAnomalies ? `2px solid ${C.red}` : "2px solid transparent",
+                  borderLeft: "2px solid transparent",
                 }}
                 onClick={() => router.push(`/satellite/${sat.norad_id}`)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    router.push(`/satellite/${sat.norad_id}`);
+                  }
+                }}
+                tabIndex={0}
+                role="button"
                 onMouseEnter={(e) =>
                   (e.currentTarget.style.backgroundColor = C.hover)
                 }
@@ -209,19 +228,6 @@ export default function SatelliteSelector() {
                 >
                   <span style={{ marginRight: flag ? "6px" : 0 }}>{flag}</span>
                   {sat.name}
-                  {hasAnomalies && (
-                    <span
-                      style={{
-                        display: "inline-block",
-                        width: "6px",
-                        height: "6px",
-                        borderRadius: "50%",
-                        backgroundColor: C.red,
-                        marginLeft: "8px",
-                        verticalAlign: "middle",
-                      }}
-                    />
-                  )}
                 </td>
 
                 {/* OPERATOR */}
@@ -264,12 +270,7 @@ export default function SatelliteSelector() {
                   className="font-data hidden lg:table-cell"
                   style={{ padding: "8px 12px", fontSize: "11px", color: C.secondary }}
                 >
-                  {sat.fetched_at
-                    ? new Date(sat.fetched_at)
-                        .toISOString()
-                        .slice(0, 19)
-                        .replace("T", " ") + "Z"
-                    : "—"}
+                  {formatUtcTimestamp(sat.fetched_at)}
                 </td>
 
                 {/* PARAMS */}
@@ -292,11 +293,11 @@ export default function SatelliteSelector() {
                     padding: "8px 12px",
                     fontSize: "12px",
                     textAlign: "right",
-                    color: hasAnomalies ? C.red : C.secondary,
-                    fontWeight: hasAnomalies ? 600 : 400,
+                    color: C.secondary,
                   }}
+                  title="Available in satellite detail view to reduce API load."
                 >
-                  {hasAnomalies ? anomalyCount : "—"}
+                  —
                 </td>
               </tr>
             );
@@ -316,3 +317,4 @@ export default function SatelliteSelector() {
     </div>
   );
 }
+

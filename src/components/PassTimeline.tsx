@@ -13,10 +13,25 @@ const C = {
   red: "#f85149",
 };
 
+interface PassItem {
+  observation_id: string;
+  status?: string;
+  ground_station?: string;
+  station_name?: string;
+  start_time?: string;
+}
+
 interface PassTimelineProps {
-  passes: any[];
+  passes: PassItem[];
   onSelectPass: (obsId: string) => void;
   selectedPassId?: string;
+}
+
+function formatPassStart(value: string | undefined): string {
+  if (!value) return "-- --:--";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "-- --:--";
+  return d.toISOString().slice(5, 16).replace("T", " ");
 }
 
 export default function PassTimeline({ passes, onSelectPass, selectedPassId }: PassTimelineProps) {
@@ -33,10 +48,7 @@ export default function PassTimeline({ passes, onSelectPass, selectedPassId }: P
       <div style={{ display: "flex", gap: "4px", minWidth: "max-content" }}>
         {passes.map((pass) => {
           const isSelected = pass.observation_id === selectedPassId;
-          const borderColor =
-            pass.status === "good" ? C.green :
-            pass.status === "bad" ? C.secondary :
-            C.orange;
+          const borderColor = pass.status === "good" ? C.green : pass.status === "bad" ? C.secondary : C.orange;
 
           return (
             <button
@@ -68,7 +80,6 @@ export default function PassTimeline({ passes, onSelectPass, selectedPassId }: P
                 if (!isSelected) e.currentTarget.style.backgroundColor = "transparent";
               }}
             >
-              {/* Pass ID + ground station */}
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <span
                   className="font-data"
@@ -92,11 +103,8 @@ export default function PassTimeline({ passes, onSelectPass, selectedPassId }: P
               >
                 {pass.ground_station || pass.station_name || "GS"}
               </span>
-              <span
-                className="font-data"
-                style={{ fontSize: "10px", color: C.secondary }}
-              >
-                {new Date(pass.start_time).toISOString().slice(5, 16).replace("T", " ")}
+              <span className="font-data" style={{ fontSize: "10px", color: C.secondary }}>
+                {formatPassStart(pass.start_time)}
               </span>
             </button>
           );

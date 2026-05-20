@@ -1,409 +1,733 @@
 # Downlink
 
-**Ground station telemetry intelligence for SatNOGS satellites.**
+A ground-station telemetry dashboard for satellites tracked by [SatNOGS](https://satnogs.org/). Fetches decoded telemetry frames and pass observations from the SatNOGS APIs, runs z-score anomaly detection and trend analysis, and exposes a natural-language query interface backed by Azure OpenAI. When the SatNOGS API rate-limits requests, a deterministic simulator generates synthetic frames so the UI keeps working.
 
-Pulls live observation data from the SatNOGS network, decodes telemetry frames across dozens of satellite parameters, runs statistical anomaly detection against historical baselines, and lets you ask natural language questions about spacecraft health — all through a mission-control interface that polls in real time.
-
-### **[Live Demo →](https://downlink.vercel.app/)**
+> **Demo / portfolio project.** The SatNOGS public API is heavily rate-limited — you will hit HTTP 429 within minutes of normal use, and many satellites have no decoded telemetry frames at all. The focus is the backend: caching, rate-limit-aware fallback, statistical analysis, and the AI query pipeline. All of that runs and returns real output regardless of whether the SatNOGS API is reachable.
 
 ---
 
-## Background
 
-SatNOGS is a global network of open-source ground stations. Volunteers run antennas, the network schedules passes, and decoded telemetry frames end up in a public database. That database has millions of frames across hundreds of satellites — battery voltages, solar panel currents, onboard temperatures, RF power levels, attitude data.
+## Table of Contents
 
-The problem is that the raw data is just that: raw. The SatNOGS DB API gives you frames and timestamps. It doesn't tell you whether a battery voltage reading is normal or drifting. It doesn't flag when a solar current drops 40% between passes. It doesn't correlate a temperature spike with a ground station's observation window. You get data, not awareness.
-
-I built Downlink because I wanted to point at a satellite and immediately know: is it healthy, is something changing, and what happened on the last pass. Not by manually pulling frames and computing statistics — by having a pipeline that does all of that continuously and tells me when something looks wrong.
-
----
-
-## Why This Exists
-
-Existing SatNOGS tools are built for data access — browse frames, download CSVs, check transmitter status. That's useful for satellite operators who already know what to look for. It's not useful for monitoring, where the point is to catch what you *didn't* expect.
-
-Downlink bridges that gap. It takes the raw telemetry pipeline and adds three layers on top:
-
-1. **Statistical baselines** — rolling means and standard deviations per parameter, so every new reading has context
-2. **Anomaly detection** — sigma-based flagging that catches deviations without manual threshold tuning
-3. **Natural language interface** — ask "what happened on the last pass?" and get an answer grounded in actual telemetry data, not a generic summary
-
-The frontend is designed to look like a ground station ops console — dark, dense, monospaced data values, status dots, no visual noise. If something is nominal, the interface is quiet. If something is wrong, it's immediately visible.
+1. [What This Is](#what-this-is)
+2. [Architecture](#architecture)
+3. [Data Flow](#data-flow)
+4. [Backend Modules](#backend-modules)
+   - [SatNOGS Client & Cache](#satnogs-client--cache)
+   - [Synthetic Telemetry Simulator](#synthetic-telemetry-simulator)
+   - [Anomaly Detector](#anomaly-detector)
+   - [Trend Analyzer](#trend-analyzer)
+   - [AI Engine](#ai-engine)
+5. [API Reference](#api-reference)
+6. [Frontend Components](#frontend-components)
+7. [Rate Limiting](#rate-limiting)
+8. [Setup](#setup)
+9. [Environment Variables](#environment-variables)
+10. [Known Limitations](#known-limitations)
 
 ---
 
-## What It Actually Does
+## What This Is
 
-### Satellite Catalog
+SatNOGS is an open-source network of volunteer ground stations that receive and upload satellite signals. The decoded frames are available through a public API. That API is rate-limited, returns raw JSON with deeply nested payloads, and has no analysis layer — just rows.
 
-The landing page loads the full satellite catalog from the backend. Each satellite row shows:
+Downlink adds:
 
-- **NORAD ID** — monospaced, clickable, links to the detail view
-- **Name** with country flag emoji (derived from the SATCAT country code)
-- **Operator** — truncated with ellipsis for long names
-- **Status dot** — green (alive), red (dead), orange (unknown)
-- **Last contact** — ISO 8601 timestamp of the most recent telemetry fetch
-- **Parameter count** — how many distinct telemetry parameters exist for this satellite
-- **Anomaly count** — live count of detected anomalies, fetched in parallel for all telemetry-capable satellites
+- A **SQLite cache** so repeated polls don't hit the API every time
+- A **telemetry simulator** that generates synthetic frames when the API is rate-limited or unreachable
+- A **z-score anomaly detector** that flags the latest reading of any parameter if it's more than 2.5 standard deviations from its window mean
+- A **trend analyzer** that computes direction and percent change across a frame window
+- A **query endpoint** that accepts natural-language questions, classifies intent, extracts relevant stats, and optionally calls an LLM for a prose answer
 
-Satellites with active anomalies get a red left border and a red dot next to their name. The table is sortable: NORAD 39444 is pinned first (primary test satellite), then telemetry-capable satellites, then everything else.
-
-**Filtering** works across name, NORAD ID, and operator in a single search box. A "telemetry only" toggle hides satellites without decoded data.
-
-### Satellite Detail View
-
-Clicking a satellite opens a two-panel ops view that polls every 15 seconds:
-
-**Left panel (65%):**
-
-| Section | What it shows |
-|---|---|
-| Observation timeline | Horizontal scrollable list of recent ground station passes, color-coded by status (green = good, orange = unknown, red = bad). Click to select a pass. |
-| Anomaly panel | Inline red-bordered rows for every detected anomaly — parameter name, observed value, historical mean, sigma deviation, timestamp. Only appears when anomalies exist. |
-| AI query box | Natural language input with example queries. Returns text answers, optional charts, and anomaly highlights. |
-| Telemetry chart | Recharts line chart for the selected parameter. Shows historical mean as a dashed reference line. Anomalous readings are marked with red dots. Polls every 10 seconds. |
-
-**Right panel (35%):**
-
-A scrollable parameter list. Each row shows:
-- Parameter name
-- Current value (monospaced)
-- Trend arrow — green ▲ for increasing, red ▼ for decreasing, hidden below 2% change
-- Sparkline — tiny SVG line chart of recent values
-
-Clicking a parameter switches the main chart. The active parameter gets a blue left border highlight.
-
-### Anomaly Detection
-
-The backend computes anomalies using z-score deviation from rolling statistical baselines:
-
-1. For each telemetry parameter, maintain a running mean (μ) and standard deviation (σ) across all historical readings
-2. When a new value arrives, compute `z = |value - μ| / σ`
-3. Flag anything above a severity threshold
-
-Each anomaly record carries:
-- `parameter_name` — which parameter deviated
-- `value` — the observed reading
-- `mean` — the historical baseline it deviated from
-- `deviation_sigma` — how many standard deviations away (e.g., 3.2σ)
-- `severity` — classification label
-- `timestamp` — when it happened
-
-The frontend renders these as compact red-bordered rows, sorted by recency. On the satellite list page, anomaly counts are fetched concurrently using `Promise.allSettled` — a failed count for one satellite doesn't block the rest.
-
-### AI Natural Language Queries
-
-The query system accepts plain-English questions about a satellite's telemetry and returns structured responses:
-
-```
-POST /api/satellites/:norad_id/query
-{ "query": "Battery voltage trend last 10 passes" }
-```
-
-The backend (GPT-4o) interprets the query, pulls relevant telemetry data, and returns:
-
-| Field | Description |
-|---|---|
-| `answer_text` | Natural language response grounded in actual data |
-| `intent.parameter_name` | Which parameter the query maps to (if applicable) |
-| `chart_data` | If the answer involves a trend, returns data for chart rendering |
-| `anomalies_flagged` | Array of anomalies relevant to the query |
-
-When the response includes `chart_data` and a parameter name, the frontend automatically renders a telemetry chart for that parameter. When it includes `anomalies_flagged`, those are rendered as inline red-bordered rows with observed vs. mean values.
-
-Example queries that ship with the UI:
-- "Battery voltage trend last 10 passes"
-- "Any anomalies in the last 24 hours?"
-- "What happened recently?"
-- "Compare solar current morning vs evening"
-
-### Pass Summary Cards
-
-For each ground station observation, the backend can generate a GPT-4o summary that classifies the pass as **NOMINAL** or flags anomalies:
-
-- Green header with ✓ icon for nominal passes
-- Red header with ⚠ icon for anomalous passes
-- Pass duration displayed in minutes and seconds
-- Natural language summary text
-- Expandable parameter detail table — columns for parameter name, pass mean, historical mean, and status comparison
-
-When the LLM is unavailable, the card shows a "No telemetry data to summarize" state rather than failing.
-
-### Trend Analysis
-
-Each parameter gets a trend computed from recent readings:
-
-- **Direction** — `increasing`, `decreasing`, or `stable`
-- **Percent change** — magnitude of the trend
-- **Display threshold** — trend arrows only appear when change exceeds 2%, preventing visual noise from normal fluctuation
-
-The sparkline in the parameter list gives a quick visual of the trajectory without needing to open the full chart.
-
-### Real-Time Polling
-
-The interface is designed to stay current without manual refresh:
-
-| Component | Poll interval | Strategy |
-|---|---|---|
-| Satellite detail | 15 seconds | Full data refresh, no loading flash on subsequent polls |
-| Telemetry chart | 10 seconds | Data refresh with sort stability, loading state only on first load |
-| Anomaly counts | On page load | Parallel fetch via `Promise.allSettled`, non-blocking |
-
-Both polling loops use a `mounted` flag to cancel stale responses when navigating away — no state updates on unmounted components.
-
----
-
-## Design Decisions
-
-**Why a mission-control aesthetic instead of a modern dashboard?**
-Telemetry interfaces need to be scannable. Operators look at these screens for hours. Rounded corners, drop shadows, and gradient cards add visual weight that competes with the data. The design strips all of that: 2px border radius cap, box shadows killed globally, monospaced values, muted colors that only get bright when something needs attention. The scanline overlay (`repeating-linear-gradient` at 0.03 opacity) adds the CRT-terminal feel without affecting readability.
-
-**Why poll instead of WebSockets?**
-SatNOGS data doesn't update sub-second. Ground station passes happen on orbital periods (~90 minutes for LEO). Telemetry frames arrive in batches when a pass completes. Polling every 10–15 seconds catches new data within one cycle of the backend's own cache refresh. WebSockets would add connection management complexity for zero practical latency improvement.
-
-**Why fetch anomaly counts in parallel with `Promise.allSettled`?**
-The satellite list can have dozens of entries. Fetching anomaly counts sequentially would make the page feel slow. `allSettled` fires all requests concurrently and never rejects — if one satellite's anomaly endpoint is down, the rest still populate. A failed count defaults to 0 instead of breaking the list.
-
-**Why Recharts instead of hand-rolled canvas?**
-Telemetry charts need reference lines (historical mean), anomaly markers (red dots at specific data points), responsive sizing, and proper axis formatting. Recharts gives `ReferenceLine`, `ReferenceDot`, `ResponsiveContainer`, and custom tick formatters out of the box. The overhead is justified — these aren't simple sparklines.
-
-**Why a separate sparkline component instead of Recharts?**
-The parameter list renders one sparkline per parameter — potentially 30+ on screen. Recharts is too heavy for that. The sparkline is a 48×16px SVG polyline — no axes, no tooltips, no responsiveness needed. Renders in microseconds.
-
-**Why proxy the backend through Next.js rewrites?**
-The frontend runs on `:3000`, the backend on `:8000`. Instead of configuring CORS on FastAPI, the Next.js config rewrites `/api/*` to `http://127.0.0.1:8000/*`. Same-origin requests, no CORS headers, no preflight OPTIONS calls. Simpler in development and production.
-
-**Why pin NORAD 39444 to the top of the list?**
-That's the primary test satellite with the richest telemetry data. Pinning it ensures the first thing someone sees is a satellite with actual data to explore, not an empty detail view.
+The frontend is a Next.js app: a satellite catalog, a detail page per satellite (pass timeline, telemetry chart, anomaly panel, parameter list), and the query box.
 
 ---
 
 ## Architecture
 
 ```mermaid
-graph TB
-    subgraph External["External Data Sources"]
-        SN["SatNOGS Network API<br/>network.satnogs.org"]
-        SD["SatNOGS DB API<br/>db.satnogs.org"]
+graph TD
+    subgraph Browser
+        A[Next.js Frontend<br/>React 19 · TypeScript · Recharts]
     end
 
-    subgraph Backend["Python Backend — FastAPI :8000"]
-        F["Data Fetcher<br/>SatNOGS client + cache"]
-        TD["Telemetry Decoder<br/>Frame parsing + normalization"]
-        AD["Anomaly Detector<br/>Z-score baselines"]
-        TA["Trend Analyzer<br/>Direction + % change"]
-        AI["AI Query Engine<br/>GPT-4o + telemetry context"]
-        PS["Pass Summarizer<br/>Per-observation analysis"]
-        API["REST API Layer<br/>FastAPI endpoints"]
+    subgraph Next_Server["Next.js Server (port 3000)"]
+        B[/api/* rewrite proxy/]
     end
 
-    subgraph Frontend["Next.js Frontend — React 19 :3000"]
-        SL["Satellite List<br/>Catalog browser + anomaly counts"]
-        DV["Detail / Ops View<br/>Two-panel layout"]
-        PT["Pass Timeline<br/>Observation history"]
-        AP["Anomaly Panel<br/>Sigma deviation alerts"]
-        TC["Telemetry Chart<br/>Recharts + anomaly markers"]
-        AQ["AI Query Box<br/>Natural language interface"]
-        PL["Parameter List<br/>Sparklines + trends"]
+    subgraph FastAPI_Backend["FastAPI Backend (port 8000)"]
+        C[main.py<br/>Route handlers · Rate limiter]
+        D[satnogs_client.py<br/>HTTP + SQLite cache]
+        E[anomaly_detector.py<br/>Z-score engine]
+        F[trend_analyzer.py<br/>Percent-change engine]
+        G[ai_engine.py<br/>Intent → LLM → Schema validation]
     end
 
-    SN -->|"Observations, stations"| F
-    SD -->|"Telemetry frames, SATCAT"| F
-    F --> TD
-    TD --> AD
-    TD --> TA
-    TD --> AI
-    TD --> PS
-    AD --> API
-    TA --> API
-    AI --> API
-    PS --> API
-    API -->|"JSON over /api/* proxy"| SL
-    API -->|"15s polling"| DV
-    DV --> PT
-    DV --> AP
-    DV --> TC
-    DV --> AQ
-    DV --> PL
+    subgraph External
+        H[(SatNOGS DB API<br/>db.satnogs.org)]
+        I[(SatNOGS Network API<br/>network.satnogs.org)]
+        J[(Azure OpenAI)]
+    end
+
+    subgraph Local_Storage["Local Storage"]
+        K[(SQLite cache.db)]
+    end
+
+    A -->|fetch /api/*| B
+    B -->|proxy| C
+    C --> D
+    C --> E
+    C --> F
+    C --> G
+    D -->|cache miss| H
+    D -->|cache miss| I
+    D -->|read/write| K
+    G -->|LLM call| J
 ```
 
 ---
 
-## Data Pipeline
+## Data Flow
+
+### Telemetry request (happy path)
 
 ```mermaid
 sequenceDiagram
-    participant SN as SatNOGS Network
-    participant DB as SatNOGS DB
-    participant F as Data Fetcher
-    participant TD as Telemetry Decoder
-    participant AD as Anomaly Detector
-    participant TA as Trend Analyzer
-    participant AI as AI Engine
-    participant API as REST API
-    participant UI as Frontend
+    participant UI as Next.js UI
+    participant API as FastAPI /telemetry
+    participant Cache as SQLite cache.db
+    participant SatNOGS as SatNOGS DB API
 
-    F->>SN: Fetch observations for satellite
-    SN-->>F: Observation list (pass times, ground stations, status)
-    F->>DB: Fetch telemetry frames (NORAD ID)
-    DB-->>F: Raw decoded frames (parameter, value, timestamp)
-    F->>DB: Fetch satellite metadata (SATCAT)
-    DB-->>F: Name, operator, country, status
+    UI->>API: GET /satellites/{norad_id}/telemetry?parameter=battery_voltage&last_n=100
+    API->>Cache: SELECT WHERE key='telemetry_v2_{norad_id}' AND age < 3600s
+    alt Cache hit
+        Cache-->>API: JSON frames
+    else Cache miss
+        API->>SatNOGS: GET /telemetry/?satellite={norad_id}
+        SatNOGS-->>API: decoded frames[]
+        API->>Cache: INSERT OR REPLACE
+    end
+    API->>API: flatten nested decoded dicts → {param: value}
+    API->>API: filter by parameter name, sort descending, take last_n
+    API-->>UI: {values: [...], is_simulated: false}
+```
 
-    Note over TD: Normalize + deduplicate frames
+### Telemetry request (rate-limited fallback)
 
-    TD->>AD: Stream parameter values
-    AD->>AD: Compute rolling μ and σ per parameter
-    AD->>AD: Flag readings beyond threshold (z-score)
-    AD-->>API: Anomaly records (param, value, mean, σ deviation)
+```mermaid
+sequenceDiagram
+    participant API as FastAPI
+    participant SatNOGS as SatNOGS DB API
+    participant Sim as Synthetic Simulator
 
-    TD->>TA: Recent value window per parameter
-    TA->>TA: Compute direction + percent change
-    TA-->>API: Trend metadata (direction, %, sparkline values)
-
-    UI->>API: GET /satellites
-    API-->>UI: Catalog with parameter counts
-
-    UI->>API: GET /satellites/:id
-    API-->>UI: Detail (satellite, parameters, summaries, passes)
-
-    UI->>API: GET /satellites/:id/telemetry?parameter=X
-    API-->>UI: Time-series values for charting
-
-    UI->>API: GET /satellites/:id/anomalies
-    API-->>UI: Active anomaly list
-
-    UI->>API: POST /satellites/:id/query
-    API->>AI: Interpret query + pull relevant telemetry
-    AI-->>API: Structured response (text, chart data, anomalies)
-    API-->>UI: AI answer + optional chart + flagged anomalies
+    API->>SatNOGS: GET /telemetry/
+    SatNOGS-->>API: HTTP 429 + Retry-After header
+    API->>API: set _telemetry_backoff_until = now + Retry-After (max 8s)
+    API->>Sim: _generate_synthetic_frames(norad_id, limit)
+    Sim-->>API: frames with _simulated=True
+    API-->>UI: {values: [...], is_simulated: true}
 ```
 
 ---
 
-## Tech Stack
+## Backend Modules
 
-| Layer | What | Why |
-|---|---|---|
-| Frontend framework | Next.js 16, React 19, TypeScript | Server components, file-based routing, fast HMR |
-| Charts | Recharts 3 | Reference lines, anomaly dot markers, responsive containers — all built in |
-| Icons | Lucide React | Tree-shakeable, consistent stroke weight |
-| Styling | Tailwind CSS 4 | Dark mission-control design system with custom theme tokens |
-| Class utilities | clsx + tailwind-merge | Conditional classes without duplicates |
-| Typography | Inter (UI) + JetBrains Mono (data) | Clean sans-serif for labels, monospace for values and timestamps |
-| Backend | Python, FastAPI, Uvicorn | Async endpoints, automatic OpenAPI docs |
-| Data source | SatNOGS Network + DB APIs | Only open-source global ground station network |
-| AI layer | GPT-4o (Azure OpenAI) | Structured telemetry Q&A with parameter extraction |
-| Proxy | Next.js rewrites | `/api/*` → `localhost:8000`, eliminates CORS |
+### SatNOGS Client & Cache
+
+`backend/satnogs_client.py` — 838 lines
+
+The client talks to two separate SatNOGS APIs:
+
+| API | Base URL | Auth |
+|-----|----------|------|
+| DB API | `https://db.satnogs.org/api` | `Authorization: Token <SATNOGS_API_TOKEN>` |
+| Network API | `https://network.satnogs.org/api` | None required |
+
+**SQLite schema** (`cache.db`):
+
+```mermaid
+erDiagram
+    cache {
+        TEXT key PK
+        TEXT value
+        REAL fetched_at
+    }
+    satellites {
+        INTEGER norad_id PK
+        TEXT name
+        TEXT status
+        TEXT countries
+        TEXT operator
+        TEXT launched
+        INTEGER has_telemetry
+        INTEGER parameter_count
+        TEXT fetched_at
+    }
+    telemetry {
+        INTEGER id PK
+        INTEGER norad_id
+        TEXT parameter_name
+        REAL value
+        TEXT timestamp
+        REAL fetched_at
+    }
+    observations {
+        TEXT observation_id PK
+        INTEGER norad_id
+        TEXT status
+        TEXT ground_station
+        TEXT station_name
+        TEXT start_time
+        TEXT end_time
+        REAL fetched_at
+    }
+```
+
+**Cache TTLs:**
+
+| Table / Key | TTL | Reason |
+|-------------|-----|--------|
+| `satellites_list_full_v2` | 86 400 s (24 h) | Catalog changes rarely |
+| `satellite_{norad_id}` | 86 400 s (24 h) | Same — metadata is stable |
+| `telemetry_v2_{norad_id}` | 3 600 s (1 h) | Frames arrive after passes end, not in real-time |
+| `observations_{norad_id}` | 3 600 s (1 h) | Pass records don't change after the fact |
+
+**HTTP retry logic** (inside `_get()`):
+
+- Up to 3 attempts for transient 5xx and network errors
+- Backoff: `0.6 × attempt` seconds between retries
+- On `429`: reads `Retry-After` header (capped at 8 s), sets a process-level backoff timestamp for the telemetry endpoint, re-raises immediately without retrying
+
+**Curated NORAD list** — 26 satellites known to have decoded telemetry on SatNOGS:
+
+```
+FUNcube-1 (39444)  ISS (25544)       FOX-1D/AO-92 (43137)
+JY1SAT (43803)     GREENCUBE (53106) NAYIF-1/EO-88 (42017)
+ESEO (43678)       CAS-6/TO-108 (47960)  NOAA 15/18/19 ...
+```
+
+These appear first in the catalog response. Up to 300 other satellites follow.
+
+**Key-flattening** — decoded frames contain nested JSON. The client recurses the tree and produces dot-separated keys:
+
+```
+{"eps": {"battery": {"voltage": 8.1}}}
+→ {"eps.battery.voltage": 8.1}
+```
+
+Only numeric (non-bool) leaves are kept. `_flatten_values()` is shared across the client, anomaly detector, trend analyzer, and AI engine.
 
 ---
 
+### Synthetic Telemetry Simulator
+
+When the API is rate-limited or unavailable, `_generate_simulated_payload()` generates telemetry values for each subsystem. Every output is **deterministic** — same `norad_id` + `timestamp` always gives the same numbers.
+
+**Subsystems modeled:**
+
+```mermaid
+graph LR
+    OT[Orbital Phase<br/>ω = 2π / period_s] --> IL[Illumination<br/>sunlit ∈ 0..1]
+    IL --> EPS[Power Subsystem<br/>solar_current · battery_v]
+    IL --> TH[Thermal<br/>eps_temp · cpu_temp]
+    EPS --> RF[RF / TX<br/>tx_power · rssi]
+    TH --> RF
+    AG[Aging Factor<br/>years since 2020] --> EPS
+```
+
+**Orbital mechanics (simplified):**
+
+```
+ω = 2π / orbit_period_s          # angular velocity
+phase = epoch_unix × ω
+
+sunlit = clamp(0.5 + 0.55 × (0.8·sin(phase) + 0.2·sin(2·phase)), 0, 1)
+eclipse = 1 − sunlit
+```
+
+`orbit_period_s` is 5 400–6 200 s (90–103 min), seeded per NORAD ID so each satellite has its own orbit.
+
+**Power subsystem:**
+
+```
+solar_current = panel_peak_A × sunlit × attitude_loss × aging_factor
+net_charge    = (solar_current × 0.18) − (load × (0.65 + 0.35 × eclipse))
+battery_v     = nom_v + swing_v × net_charge   [clamped 6.8–8.5 V]
+```
+
+**Thermal coupling to load:**
+
+```
+eps_temp = thermal_env + 2.0 × load_factor + noise
+cpu_temp = eps_temp + cpu_offset + 1.8 × load_factor + noise
+```
+
+**RF derating (thermal + low-voltage):**
+
+```
+if cpu_temp > 56°C:  tx_power −= (cpu_temp − 56) × 0.025   (max −0.35 W)
+if battery_v < 7.55: tx_power −= (7.55 − battery_v) × 0.35 (max −0.28 W)
+```
+
+**Short-lived events** — 3% of 15-minute windows trigger an event (MD5-keyed by `norad_id:window`):
+
+| Event | Effect |
+|-------|--------|
+| `temp_spike` | `cpu_temp += 8 × intensity` |
+| `battery_sag` | `battery_v −= 0.45 × intensity` |
+| `panel_shadow` | `solar_current ×= (1 − 0.55 × intensity)` |
+| `rf_fade` | `rssi −= 14 × intensity` |
+
+**Frame generation cadence** (`_generate_synthetic_frames()`):
+
+```mermaid
+flowchart LR
+    A[walk backwards from now] --> B{in_pass?<br/>visibility > 0.28}
+    B -->|yes| C[dense: 45–110 s steps<br/>emit frame]
+    B -->|no| D{housekeeping<br/>window?}
+    D -->|yes every 4h| E[sparse: 240–720 s steps<br/>emit frame]
+    D -->|no| F[skip, advance]
+```
+
+The chart shows a `⚠ Simulator Active` banner when any frame in the response has `_simulated: true`.
+
+---
+
+### Anomaly Detector
+
+`backend/anomaly_detector.py`
+
+Runs a z-score test on the **latest reading** of each parameter against the mean and stddev of up to 200 frames.
+
+**Algorithm:**
+
+```
+μ = mean(all values for parameter)
+σ = stddev(all values for parameter)
+z = |latest_value − μ| / σ
+```
+
+| z-score | Severity |
+|---------|----------|
+| z > 2.5 | `warning` |
+| z > 4.0 | `critical` |
+| z ≤ 2.5 | (no anomaly) |
+
+Minimum sample size is 5 readings. Parameters where σ = 0 (all identical values) are skipped to avoid division by zero.
+
+**Response shape** per anomaly:
+
+```json
+{
+  "parameter_name": "temp_cpu",
+  "value": 72.4,
+  "mean": 28.1,
+  "deviation_sigma": 3.8,
+  "severity": "warning",
+  "timestamp": "2025-05-18T14:23:00Z"
+}
+```
+
+---
+
+### Trend Analyzer
+
+`backend/trend_analyzer.py`
+
+Computes simple first-to-last percent change across all frames for a named parameter.
+
+```
+pct_change = ((last − first) / |first|) × 100
+```
+
+| pct_change | direction |
+|-----------|-----------|
+| > +2% | `increasing` |
+| < −2% | `decreasing` |
+| −2% to +2% | `stable` |
+
+`/trend/{parameter}` returns trend direction + percent change, plus anomalies filtered to that parameter.
+
+---
+
+### AI Engine
+
+`backend/ai_engine.py` — 1 001 lines
+
+LLM calls are optional. Without Azure OpenAI credentials the engine returns deterministic template responses built from the computed stats.
+
+```mermaid
+flowchart TD
+    Q[User query string] --> N[Normalize + redact<br/>strip PII, truncate to 300 chars]
+    N --> PR[Parameter resolution<br/>alias table → fuzzy match → token overlap]
+    PR --> HE[Hour extraction<br/>regex for 'last 6 hours', 'today', 'this week']
+    HE --> CC[Compute context<br/>per-param stats from telemetry frames]
+    CC --> IC[Intent classify<br/>deterministic keyword match first]
+    IC -->|if LLM available| IL[LLM intent call<br/>INTENT_MODEL, temp=0, max 1 attempt]
+    IL --> DF[Deterministic findings<br/>pull stats from context dict]
+    IC --> DF
+    DF --> CK{Cache hit?<br/>key: norad:query:data_hash:prompt_ver}
+    CK -->|yes| RET[Return cached]
+    CK -->|no LLM| TF[Template response]
+    CK -->|LLM available| LS[LLM synthesis call<br/>SYNTHESIS_MODEL, temp=0.25, max 2 attempts]
+    LS -->|validate| PV[Pydantic schema check<br/>QueryLLMResponse]
+    PV -->|pass| CACHE[Store in _QUERY_CACHE]
+    PV -->|fail| TF
+    TF --> CACHE
+    CACHE --> RET
+```
+
+**Intent types:**
+
+| Intent | Triggered by keywords |
+|--------|-----------------------|
+| `trend` | trend, history, over time, change, plot, chart |
+| `anomaly` | anomaly, anomalies, outlier, abnormal, alert |
+| `compare` | compare, vs, versus, difference, morning, evening |
+| `pass_summary` | pass, observation, latest pass, last pass |
+| `health_overview` | (default) |
+
+**Parameter resolution order:**
+1. Exact substring match of parameter name in query
+2. Alias table lookup (e.g. "battery" → `battery_voltage`, "solar" → `solar_panel_current`)
+3. `difflib.get_close_matches` fuzzy match (cutoff 0.55)
+4. Token-overlap scoring between query words and parameter name tokens
+
+**Two-model strategy:**
+
+| Model slot | Env var | Role | Temperature |
+|-----------|---------|------|-------------|
+| Intent model | `AZURE_OPENAI_INTENT_DEPLOYMENT` | Classify intent + extract parameter | 0.0 |
+| Synthesis model | `AZURE_OPENAI_SYNTH_DEPLOYMENT` | Generate `answer_text` prose | 0.25 |
+
+Both can point to the same deployment. The split exists so you can use a smaller model for classification and a larger one for answer generation.
+
+**Response cache** — in-memory dict keyed by `{norad_id}:{normalized_query}:{data_hash}:{prompt_version}`:
+
+- TTL: 120 s (configurable via `AI_CACHE_TTL_SECONDS`)
+- Max items: 800 (configurable via `AI_CACHE_MAX_ITEMS`)
+- Eviction: expired entries first, then oldest by insertion time
+
+`data_hash` is SHA-256 (truncated to 20 chars) over frame count, timestamp range, anomaly count, and parameter list. When the data changes the key changes, bypassing the cache.
+
+**Confidence scoring:**
+
+```
+coverage = min(1.0, frame_count / 120)
+if focused parameter: coverage = coverage×0.6 + param_coverage×0.4
+anomaly_penalty = min(0.15, anomaly_count / 100)
+parameter_bonus = min(0.10, param_count / 80)
+score = clamp(coverage + parameter_bonus − anomaly_penalty, 0.05, 0.98)
+```
+
+Every response includes a `provenance` object: model name, pipeline stage (`intent`, `synthesis`, `fallback`, `template-fallback`), data hash, and prompt version.
+
+---
+
+## API Reference
+
+FastAPI runs on port 8000. The Next.js config proxies `/api/*` → `http://127.0.0.1:8000/*`, so the browser only ever talks to port 3000.
+
+| Method | Path | What it does |
+|--------|------|--------------|
+| `GET` | `/satellites` | Returns the curated catalog (26 prioritized + up to 300 others). Cached 24 h. |
+| `GET` | `/satellites/{norad_id}` | Single satellite metadata + parameter list + summaries + last 10 passes in one response. |
+| `GET` | `/satellites/{norad_id}/telemetry` | Time-series values for one parameter (or all parameters). `?parameter=battery_voltage&last_n=100` |
+| `GET` | `/satellites/{norad_id}/anomalies` | Z-score anomalies across the last 200 frames. |
+| `GET` | `/satellites/{norad_id}/trend/{parameter}` | Trend direction + percent change + per-parameter anomalies. |
+| `GET` | `/satellites/{norad_id}/observations/{obs_id}/summary` | AI-generated summary for one specific pass. |
+| `POST` | `/satellites/{norad_id}/query` | Natural-language telemetry query. Body: `{"query": "..."}` |
+| `GET` | `/health` | Returns `{"status": "ok"}`. Used for uptime checks. |
+
+### Example: telemetry response
+
+```jsonc
+// GET /satellites/39444/telemetry?parameter=battery_voltage&last_n=5
+{
+  "values": [
+    {"timestamp": "2025-05-18T14:51:00Z", "value": 8.12},
+    {"timestamp": "2025-05-18T14:49:00Z", "value": 8.09},
+    {"timestamp": "2025-05-18T14:47:00Z", "value": 8.05},
+    {"timestamp": "2025-05-18T14:45:00Z", "value": 7.98},
+    {"timestamp": "2025-05-18T14:43:00Z", "value": 7.91}
+  ],
+  "is_simulated": false
+}
+```
+
+### Example: AI query response
+
+```jsonc
+// POST /satellites/39444/query  {"query": "Is the battery voltage dropping?"}
+{
+  "answer_text": "battery_voltage: last=8.12, mean=8.03, change=+0.87% over 95 points. Trend: stable.",
+  "intent": {"parameter_name": "battery_voltage"},
+  "chart_data": true,
+  "anomalies_flagged": [],
+  "confidence": {
+    "confidence_score": 0.84,
+    "data_coverage": 0.79,
+    "reason": "Good telemetry depth."
+  },
+  "provenance": {
+    "prompt_version": "downlink-v2.1",
+    "model_used": "gpt-4o",
+    "model_stage": "synthesis",
+    "intent": "trend",
+    "data_hash": "a3f91b2c8e114d",
+    "data_points_used": 95,
+    "parameters_used": ["battery_voltage"],
+    "time_window_start": "2025-05-17T10:00:00Z",
+    "time_window_end": "2025-05-18T14:51:00Z"
+  },
+  "cache_hit": false
+}
+```
+
+---
+
+## Frontend Components
+
+All components are in `src/components/`. The satellite detail page is `src/app/satellite/[norad_id]/`.
+
+```mermaid
+graph TD
+    Page["page.tsx<br/>satellite detail route"]
+    SS[SatelliteSelector]
+    TC[TelemetryChart]
+    AP[AnomalyPanel]
+    PT[PassTimeline]
+    PSC[PassSummaryCard]
+    AQ[AIQueryBox]
+
+    Page --> SS
+    Page --> TC
+    Page --> AP
+    Page --> PT
+    Page --> PSC
+    Page --> AQ
+```
+
+| Component | What it does |
+|-----------|-------------|
+| `SatelliteSelector` | Catalog search across name, NORAD ID, and operator. Curated satellites surface first. Shows `has_telemetry` badge and parameter count. |
+| `TelemetryChart` | Recharts `LineChart`. Polls every 10 s — skips fetch if `document.visibilityState !== "visible"`. Fires `fetchTelemetry` + `fetchTrend` in parallel. Overlays anomaly `ReferenceDot` markers and a dashed historical mean line. Shows simulator banner when `is_simulated: true`. |
+| `AnomalyPanel` | List of z-score anomalies (parameter, value, μ, σ deviation, UTC timestamp). At most 10 rows, hidden when empty. |
+| `PassTimeline` | Horizontal bar per SatNOGS observation. Clicking a bar loads the pass summary. |
+| `PassSummaryCard` | Calls `/observations/{obs_id}/summary` → AI engine summary: pass duration, per-param delta vs baseline, pass-window anomalies. |
+| `AIQueryBox` | Free-text query → `POST /query`. Renders inline chart when `chart_data: true`, deviation table when `anomalies_flagged` non-empty. Exposes confidence score, model used, and cache hit in a collapsible `<details>`. |
+
+---
+
+## Rate Limiting
+
+### AI query endpoint — sliding window per client IP + NORAD ID
+
+`main.py` uses an in-process `defaultdict(deque)` — no external state.
+
+```mermaid
+flowchart LR
+    REQ[POST /query] --> KEY["key = ip:norad_id"]
+    KEY --> CLEAN[Pop timestamps older than window_s]
+    CLEAN --> CHECK{len queue >= limit?}
+    CHECK -->|yes| R429[HTTP 429<br/>Too many AI queries]
+    CHECK -->|no| PUSH[Append now, continue]
+```
+
+Defaults (overridable via env):
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `QUERY_RATE_WINDOW_S` | `60` | Rolling window in seconds |
+| `QUERY_RATE_LIMIT` | `24` | Max requests per window per key |
+
+### SatNOGS API — backoff-aware fetch
+
+When the telemetry endpoint returns HTTP 429:
+1. `Retry-After` header is read, capped at 8 s
+2. `_telemetry_backoff_until = now + wait`
+3. All telemetry requests during that window skip the API and go to the simulator
+4. The variable lives in process memory — resets on restart
+
+### Visibility-aware frontend polling
+
+`TelemetryChart` uses `setInterval` at 10 s but checks `document.visibilityState` before each fetch:
+
+```typescript
+intervalId = setInterval(() => {
+  if (document.visibilityState !== "visible") return;
+  loadData(false);
+}, 10000);
+```
+
+Background tabs make no requests after the initial load.
+
+---
 
 ## Project Structure
 
 ```
 Downlink/
+├── backend/
+│   ├── main.py              # FastAPI app, route handlers, rate limiter
+│   ├── satnogs_client.py    # SatNOGS HTTP client + SQLite cache + simulator
+│   ├── anomaly_detector.py  # Z-score anomaly detection
+│   ├── trend_analyzer.py    # Percent-change trend analysis
+│   ├── ai_engine.py         # Intent classification, LLM calls, response cache
+│   ├── run.py               # Uvicorn entry point (dev reload)
+│   ├── eval_ai.py           # Manual AI engine eval script
+│   ├── test_api.py          # Quick API smoke tests
+│   ├── test_client.py       # SatNOGS client unit tests
+│   ├── requirements.txt
+│   ├── cache.db             # SQLite cache (gitignored)
+│   └── .env                 # Secrets (gitignored)
 ├── src/
 │   ├── app/
-│   │   ├── layout.tsx              # Root layout — Inter + JetBrains Mono fonts, dark mode
-│   │   ├── page.tsx                # Landing page — header bar + SatelliteSelector
-│   │   ├── globals.css             # Design system — theme tokens, scanlines, overrides
+│   │   ├── layout.tsx
+│   │   ├── page.tsx         # Catalog / home page
 │   │   └── satellite/
-│   │       └── [norad_id]/
-│   │           └── page.tsx        # Ops view — two-panel satellite detail with polling
+│   │       └── [norad_id]/  # Satellite detail page (dynamic route)
 │   ├── components/
-│   │   ├── SatelliteSelector.tsx   # Catalog table with search, filter, anomaly counts
-│   │   ├── TelemetryChart.tsx      # Recharts line chart with anomaly dots + mean line
-│   │   ├── PassTimeline.tsx        # Horizontal scrollable observation timeline
-│   │   ├── PassSummaryCard.tsx     # GPT-4o pass summary with expandable parameter table
-│   │   ├── AnomalyPanel.tsx        # Inline anomaly warnings — param, value, mean, σ
-│   │   └── AIQueryBox.tsx          # Natural language query input with example prompts
+│   │   ├── AIQueryBox.tsx
+│   │   ├── AnomalyPanel.tsx
+│   │   ├── PassSummaryCard.tsx
+│   │   ├── PassTimeline.tsx
+│   │   ├── SatelliteSelector.tsx
+│   │   └── TelemetryChart.tsx
 │   └── lib/
-│       ├── api.ts                  # API client — all fetch functions, no-store cache
-│       └── utils.ts                # cn() class merge + country flag emoji converter
-├── public/
-│   └── logo.png                    # Orbitwatch logo
-├── next.config.ts                  # API proxy rewrite: /api/* → localhost:8000
+│       └── api.ts           # Typed fetch wrappers for all endpoints
+├── next.config.ts           # /api/* → http://127.0.0.1:8000/* rewrite
 ├── package.json
 └── tsconfig.json
 ```
 
 ---
 
-## API Reference
-
-All endpoints are proxied through Next.js at `/api/*` and forwarded to the FastAPI backend on port 8000.
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/satellites` | Full satellite catalog — name, NORAD ID, operator, status, parameter count |
-| `GET` | `/satellites/:norad_id` | Satellite detail — metadata, parameter list, parameter summaries with trends, recent passes |
-| `GET` | `/satellites/:norad_id/telemetry` | Telemetry time series. Query params: `parameter` (name), `last_n` (count, default 100) |
-| `GET` | `/satellites/:norad_id/anomalies` | Detected anomalies — parameter, value, mean, sigma deviation, severity, timestamp |
-| `GET` | `/satellites/:norad_id/trend/:parameter` | Trend analysis — direction, percent change, anomaly list for that parameter |
-| `POST` | `/satellites/:norad_id/query` | AI query — send `{ "query": "..." }`, get structured answer with optional chart data |
-
----
-
-## Getting Started
+## Setup
 
 ### Prerequisites
 
-- Node.js 18+
-- Python 3.11+ (for the backend)
-- A SatNOGS DB API key (free — register at [db.satnogs.org](https://db.satnogs.org))
-- Azure OpenAI credentials (optional — AI queries won't work without them, everything else does)
+| Requirement | Version |
+|-------------|---------|
+| Python | 3.11+ |
+| Node.js | 18+ (20+ recommended) |
+| SatNOGS API token | Required — get one at [network.satnogs.org](https://network.satnogs.org) |
+| Azure OpenAI deployment | Optional — without it all AI responses use the deterministic template fallback |
 
-### Setup
+### 1. Backend
 
 ```bash
-# Clone
-git clone https://github.com/yoohooshantanu/Downlink.git
-cd Downlink
-
-# Frontend
-npm install
-npm run dev
-# Runs on http://localhost:3000
-
-# Backend (separate terminal — see backend repo for setup)
-# The frontend expects the API at http://localhost:8000
-# All /api/* requests are proxied via next.config.ts rewrites
+cd backend
+python -m venv venv
 ```
 
-The frontend proxies all API calls through Next.js rewrites — no CORS configuration needed. Without the backend running, the UI will load but data fetches will fail gracefully.
+Activate the virtual environment:
+
+```powershell
+# Windows (PowerShell)
+venv\Scripts\Activate.ps1
+```
+
+```bash
+# macOS / Linux
+source venv/bin/activate
+```
+
+Install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+Create `backend/.env` (copy from `.env.example` and fill in values):
+
+```env
+# Required
+SATNOGS_API_TOKEN=your_token_here
+
+# Optional — AI synthesis (omit entirely to use deterministic fallback)
+AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
+AZURE_OPENAI_API_KEY=your_key
+AZURE_OPENAI_API_VERSION=2024-02-01
+AZURE_OPENAI_DEPLOYMENT=gpt-4o          # base/fallback model
+AZURE_OPENAI_INTENT_DEPLOYMENT=gpt-4o  # intent classification model
+AZURE_OPENAI_SYNTH_DEPLOYMENT=gpt-4o   # synthesis model
+
+# Optional — tuning
+QUERY_RATE_WINDOW_S=60
+QUERY_RATE_LIMIT=24
+AI_CACHE_TTL_SECONDS=120
+AI_CACHE_MAX_ITEMS=800
+```
+
+Start the backend:
+
+```bash
+python run.py
+# → Uvicorn listening on http://localhost:8000
+```
+
+### 2. Frontend
+
+From the repo root:
+
+```bash
+npm install
+npm run dev
+# → Next.js dev server on http://localhost:3000
+```
+
+Open `http://localhost:3000`. `/api/*` is proxied to `http://127.0.0.1:8000/*` via `next.config.ts`.
+
+### Available scripts
+
+| Location | Command | Description |
+|----------|---------|-------------|
+| repo root | `npm run dev` | Start Next.js dev server (HMR) |
+| repo root | `npm run build` | Production bundle |
+| repo root | `npm run start` | Serve production bundle |
+| repo root | `npm run lint` | ESLint check |
+| `backend/` | `python run.py` | Start FastAPI with Uvicorn (auto-reload) |
 
 ---
 
-## Limitations
+## Environment Variables
 
-This is a monitoring tool, not a satellite operations platform.
-
-- **No command uplink.** Downlink is read-only. It ingests telemetry from SatNOGS — it doesn't transmit commands to spacecraft. That's a fundamentally different system with licensing, authentication, and hardware requirements.
-- **Anomaly detection is statistical, not physics-based.** The z-score approach catches deviations from historical baselines. It doesn't model expected behavior — a battery voltage that drifts slowly over months won't trigger until it crosses the sigma threshold. No thermal models, no power budget simulation, no eclipse-cycle awareness.
-- **AI answers depend on available telemetry.** The GPT-4o query system can only reference data the backend has ingested. If a satellite has sparse telemetry (few parameters, infrequent passes), the answers will be thin. The model also has no domain-specific fine-tuning — it's general-purpose, working with structured telemetry context.
-- **SatNOGS data quality varies.** Ground station hardware, antenna gain, local RF interference, and decoder bugs all affect what ends up in the database. Some frames are corrupted. Some parameters have units that changed between firmware versions. Downlink trusts whatever the SatNOGS DB returns.
-- **Single-satellite focus.** The detail view shows one satellite at a time. There's no cross-satellite comparison, no constellation-level dashboards, no fleet health overview. Each satellite is independent.
-- **No offline mode.** Everything depends on the backend being reachable. No local caching of telemetry, no service worker, no IndexedDB fallback.
-
----
-
-## What's Next
-
-If I keep working on this:
-
-- **Constellation dashboards** — group satellites by mission or operator, show fleet-level health at a glance
-- **Eclipse-aware baselines** — separate statistical models for sunlit and eclipse phases, since solar panel current and battery behavior change predictably across the orbit
-- **Webhook alerts** — push notifications when anomaly counts cross a threshold, instead of requiring someone to watch the screen
-- **Frame-level inspection** — drill down from a parameter chart to the raw decoded frames that produced each data point
-- **Historical playback** — scrub backwards through telemetry history instead of only seeing the latest window
-- **Multi-ground-station correlation** — compare the same pass observed by different ground stations to identify station-specific noise vs. real satellite behavior
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `SATNOGS_API_TOKEN` | Yes | — | Bearer token for `db.satnogs.org/api`. SatNOGS Network API doesn't require auth. |
+| `AZURE_OPENAI_ENDPOINT` | No | — | Full Azure endpoint URL. |
+| `AZURE_OPENAI_API_KEY` | No | — | Azure OpenAI key. Falls back to `OPENAI_API_KEY`. |
+| `AZURE_OPENAI_API_VERSION` | No | `2024-02-01` | API version string. |
+| `AZURE_OPENAI_DEPLOYMENT` | No | — | Base model deployment name. |
+| `AZURE_OPENAI_INTENT_DEPLOYMENT` | No | `AZURE_OPENAI_DEPLOYMENT` | Model for intent classification (can be smaller/faster). |
+| `AZURE_OPENAI_SYNTH_DEPLOYMENT` | No | `AZURE_OPENAI_DEPLOYMENT` | Model for answer synthesis. |
+| `QUERY_RATE_WINDOW_S` | No | `60` | Sliding window in seconds for AI query rate limiting. |
+| `QUERY_RATE_LIMIT` | No | `24` | Max AI queries per window per `ip:norad_id` pair. |
+| `AI_CACHE_TTL_SECONDS` | No | `120` | How long AI responses stay in the in-memory cache. |
+| `AI_CACHE_MAX_ITEMS` | No | `800` | Maximum number of entries in the AI response cache before eviction. |
 
 ---
 
-## References
+## Known Limitations
 
-- SatNOGS Network — [network.satnogs.org](https://network.satnogs.org) — global ground station scheduling and observation data
-- SatNOGS DB — [db.satnogs.org](https://db.satnogs.org) — satellite catalog, transmitter database, decoded telemetry frames
-- Libre Space Foundation — [libre.space](https://libre.space) — the organization behind SatNOGS
-- NORAD Satellite Catalog — USSPACECOM-maintained catalog of tracked objects, referenced by NORAD ID throughout the interface
+**Anomaly model is statistical only.** Z-score has no knowledge of orbital phase or expected subsystem ranges. A normal voltage dip during eclipse can trigger a `warning` if the sample window is short.
+
+**Rate limiter is in-process.** The AI query sliding window lives in a `defaultdict` in memory. It resets on restart and doesn't carry over across multiple workers.
+
+**SQLite under concurrency.** `aiosqlite` serializes writes through an async queue — fine for one user, a bottleneck under real concurrent load.
+
+**No automated test suite.** `test_api.py` and `test_client.py` are manual smoke scripts, not CI tests.
+
+**CORS is open.** `allow_origins=["*"]` — fine locally, needs tightening before any public deployment.
+
+**No auth layer.** The Next.js proxy is the only thing between the browser and FastAPI.
+
+**Data quality varies.** Many satellites have zero decoded frames on SatNOGS. `has_telemetry: false` may just mean the backend has never fetched that satellite before, not that no data exists.
+
+---
+
+## Security Notes
+
+- `backend/.env` and `backend/cache.db` are both in `.gitignore` — don't commit either
+- `main.py` redacts email addresses and long numeric strings from query text before writing to logs

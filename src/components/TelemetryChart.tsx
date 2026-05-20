@@ -18,13 +18,59 @@ interface TelemetryChartProps {
   noradId: number;
   parameter: string;
   lastN?: number;
+  pollingEnabled?: boolean;
+  compact?: boolean;
 }
 
-export default function TelemetryChart({ noradId, parameter, lastN = 100 }: TelemetryChartProps) {
-  const [data, setData] = useState<any[]>([]);
-  const [trend, setTrend] = useState<any>(null);
-  const [anomalies, setAnomalies] = useState<any[]>([]);
+interface TelemetryPoint {
+  timestamp: string;
+  value: number;
+}
+
+interface TrendAnomaly {
+  parameter_name?: string;
+  value?: number;
+  mean?: number;
+  deviation_sigma?: number;
+  severity?: string;
+  timestamp?: string;
+}
+
+interface TelemetryResponse {
+  values?: unknown[];
+  is_simulated?: boolean;
+}
+
+interface TrendResponse {
+  trend?: {
+    direction?: string;
+    percent_change?: number;
+  };
+  anomalies?: TrendAnomaly[];
+}
+
+function toTelemetryPoint(input: unknown): TelemetryPoint | null {
+  if (!input || typeof input !== "object") return null;
+  const obj = input as Record<string, unknown>;
+  const timestamp = typeof obj.timestamp === "string" ? obj.timestamp : "";
+  const numeric = typeof obj.value === "number" ? obj.value : Number(obj.value);
+  if (!timestamp || !Number.isFinite(numeric)) return null;
+  return { timestamp, value: numeric };
+}
+
+export default function TelemetryChart({
+  noradId,
+  parameter,
+  lastN = 100,
+  pollingEnabled = true,
+  compact = false,
+}: TelemetryChartProps) {
+  const [data, setData] = useState<TelemetryPoint[]>([]);
+  const [anomalies, setAnomalies] = useState<TrendAnomaly[]>([]);
   const [loading, setLoading] = useState(true);
+  const [isSimulated, setIsSimulated] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [refreshTick, setRefreshTick] = useState(0);
 
   useEffect(() => {
     let mounted = true;
@@ -32,23 +78,29 @@ export default function TelemetryChart({ noradId, parameter, lastN = 100 }: Tele
     async function loadData(showLoading = true) {
       if (showLoading && data.length === 0) setLoading(true);
       try {
-        const [telemRes, trendRes] = await Promise.all([
+        const [telemResRaw, trendResRaw] = await Promise.all([
           fetchTelemetry(noradId, parameter, Math.max(lastN, 50)),
           fetchTrend(noradId, parameter)
         ]);
+        const telemRes = telemResRaw as TelemetryResponse;
+        const trendRes = trendResRaw as TrendResponse;
 
         if (!mounted) return;
 
         // Sort chronologically for charting
-        const sortedData = [...telemRes.values].sort((a: any, b: any) => 
-          new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
-        );
+        const rawValues = Array.isArray(telemRes.values) ? telemRes.values : [];
+        const sortedData = rawValues
+          .map(toTelemetryPoint)
+          .filter((v): v is TelemetryPoint => v !== null)
+          .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
         
         setData(sortedData);
-        setTrend(trendRes.trend);
-        setAnomalies(trendRes.anomalies || []);
+        setAnomalies(Array.isArray(trendRes.anomalies) ? trendRes.anomalies : []);
+        setIsSimulated(Boolean(telemRes.is_simulated));
+        setLoadError(null);
       } catch (err) {
         console.error("Failed to poll telemetry:", err);
+        if (mounted) setLoadError("Telemetry refresh failed. Showing latest available data.");
       } finally {
         if (mounted) setLoading(false);
       }
@@ -56,21 +108,25 @@ export default function TelemetryChart({ noradId, parameter, lastN = 100 }: Tele
 
     loadData(true);
 
-    const intervalId = setInterval(() => {
-      loadData(false);
-    }, 10000);
+    let intervalId: ReturnType<typeof setInterval> | undefined;
+    if (pollingEnabled) {
+      intervalId = setInterval(() => {
+        if (document.visibilityState !== "visible") return;
+        loadData(false);
+      }, 10000);
+    }
 
     return () => {
       mounted = false;
-      clearInterval(intervalId);
+      if (intervalId) clearInterval(intervalId);
     };
-  }, [noradId, parameter, lastN]);
+  }, [noradId, parameter, lastN, pollingEnabled, refreshTick]);
 
   // Compute Y-axis domain with 10% padding and historical mean
   const { yDomain, historicalMean } = useMemo(() => {
     if (data.length === 0) return { yDomain: [0, 1] as [number, number], historicalMean: 0 };
     
-    const values = data.map((d: any) => d.value).filter((v: number) => v != null && !isNaN(v));
+    const values = data.map((d) => d.value).filter((v) => Number.isFinite(v));
     if (values.length === 0) return { yDomain: [0, 1] as [number, number], historicalMean: 0 };
     
     const min = Math.min(...values);
@@ -87,8 +143,10 @@ export default function TelemetryChart({ noradId, parameter, lastN = 100 }: Tele
 
   // Create lookup for anomalies by timestamp
   const anomalyMap = useMemo(() => {
-    const map = new Map();
-    anomalies.forEach((a) => map.set(a.timestamp, a));
+    const map = new Map<string, TrendAnomaly>();
+    anomalies.forEach((a) => {
+      if (typeof a.timestamp === "string") map.set(a.timestamp, a);
+    });
     return map;
   }, [anomalies]);
 
@@ -96,6 +154,24 @@ export default function TelemetryChart({ noradId, parameter, lastN = 100 }: Tele
     return (
       <div className="flex h-64 w-full items-center justify-center text-sm text-muted-foreground font-mono">
         Loading telemetry...
+      </div>
+    );
+  }
+
+  if (data.length === 0 && loadError) {
+    return (
+      <div className="flex h-64 w-full flex-col items-center justify-center gap-3 text-sm text-muted-foreground font-mono">
+        <span>{loadError}</span>
+        <button
+          type="button"
+          onClick={() => {
+            setLoading(true);
+            setRefreshTick((v) => v + 1);
+          }}
+          className="rounded border border-border px-3 py-1 text-xs text-foreground hover:bg-[#1c2128]"
+        >
+          Retry
+        </button>
       </div>
     );
   }
@@ -120,9 +196,27 @@ export default function TelemetryChart({ noradId, parameter, lastN = 100 }: Tele
         <span className="text-[10px] font-mono text-muted-foreground">
           {data.length} readings
         </span>
+        {compact && (
+          <span className="text-[10px] font-mono text-[var(--color-accent-blue)]">
+            AI Focus Chart
+          </span>
+        )}
       </div>
 
-      <div className="h-72 w-full">
+      {loadError && (
+        <div className="bg-amber-900/20 text-amber-500 text-[11px] px-3 py-2 rounded-md flex items-center mb-3 border border-amber-900/50 font-mono">
+          <span>{loadError}</span>
+        </div>
+      )}
+
+      {isSimulated && (
+        <div className="bg-amber-900/20 text-amber-500 text-[11px] px-3 py-2 rounded-md flex items-center mb-3 border border-amber-900/50 font-mono">
+          <span className="mr-2">⚠️</span>
+          <span><strong>Simulator Active:</strong> SatNOGS API rate limited. Displaying synthetic procedural telemetry.</span>
+        </div>
+      )}
+
+      <div className={`${compact ? "h-44" : "h-72"} w-full`}>
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#21262d" vertical={false} />
@@ -152,8 +246,15 @@ export default function TelemetryChart({ noradId, parameter, lastN = 100 }: Tele
                 fontSize: '11px',
                 fontFamily: 'var(--font-mono), monospace',
               }}
-              labelFormatter={(label) => new Date(label).toISOString().slice(0, 19).replace('T', ' ') + 'Z'}
-              formatter={(value: number) => [value.toFixed(4), parameter]}
+              labelFormatter={(label) => {
+                const d = new Date(String(label));
+                if (Number.isNaN(d.getTime())) return "Invalid timestamp";
+                return `${d.toISOString().slice(0, 19).replace("T", " ")}Z`;
+              }}
+              formatter={(value) => {
+                const numeric = typeof value === "number" ? value : Number(value);
+                return [Number.isFinite(numeric) ? numeric.toFixed(4) : "N/A", parameter];
+              }}
             />
             
             {/* Historical mean reference line */}
@@ -174,7 +275,7 @@ export default function TelemetryChart({ noradId, parameter, lastN = 100 }: Tele
             />
             
             {/* Anomaly markers */}
-            {data.map((entry: any, index: number) => {
+            {data.map((entry, index) => {
               const anomaly = anomalyMap.get(entry.timestamp);
               if (anomaly) {
                 return (
