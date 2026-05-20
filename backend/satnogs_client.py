@@ -19,6 +19,8 @@ from typing import Optional
 import httpx
 import aiosqlite
 
+from utils import flatten_values as _flatten_values_util, flatten_keys as _flatten_keys_util
+
 logger = logging.getLogger(__name__)
 
 DB_API = "https://db.satnogs.org/api"
@@ -630,26 +632,12 @@ class SatNOGSClient:
         return synthetic_frames
 
     def _flatten_keys(self, d: dict, prefix: str = "") -> list[str]:
-        """Flatten nested dict keys into dot-separated names."""
-        keys = []
-        for k, v in d.items():
-            full_key = f"{prefix}.{k}" if prefix else k
-            if isinstance(v, dict):
-                keys.extend(self._flatten_keys(v, full_key))
-            elif isinstance(v, (int, float)):
-                keys.append(full_key)
-        return keys
+        """Flatten nested dict keys into dot-separated names (delegates to utils)."""
+        return _flatten_keys_util(d, prefix)
 
     def _flatten_values(self, d: dict, prefix: str = "") -> dict[str, float]:
-        """Flatten nested dict into {dotted_key: numeric_value} pairs."""
-        result = {}
-        for k, v in d.items():
-            full_key = f"{prefix}.{k}" if prefix else k
-            if isinstance(v, dict):
-                result.update(self._flatten_values(v, full_key))
-            elif isinstance(v, (int, float)) and not isinstance(v, bool):
-                result[full_key] = float(v)
-        return result
+        """Flatten nested dict into {dotted_key: numeric_value} pairs (delegates to utils)."""
+        return _flatten_values_util(d, prefix)
 
     async def get_telemetry(self, norad_id: int,
                             parameter: Optional[str] = None,

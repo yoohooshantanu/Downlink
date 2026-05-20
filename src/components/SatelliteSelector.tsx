@@ -91,9 +91,8 @@ export default function SatelliteSelector() {
     );
   }
 
-  // Apply filters
+  // Apply search filter
   let filtered = satellites;
-
   if (searchQuery.trim() !== "") {
     const q = searchQuery.toLowerCase();
     filtered = filtered.filter(
@@ -105,9 +104,10 @@ export default function SatelliteSelector() {
   }
 
   // Sort: telemetry satellites first, then by name
+  const FEATURED_NORAD_ID = 39444; // FUNcube-1 — best telemetry coverage
   const sorted = [...filtered].sort((a, b) => {
-    if (a.norad_id === 39444) return -1;
-    if (b.norad_id === 39444) return 1;
+    if (a.norad_id === FEATURED_NORAD_ID) return -1;
+    if (b.norad_id === FEATURED_NORAD_ID) return 1;
     if (a.has_telemetry && !b.has_telemetry) return -1;
     if (!a.has_telemetry && b.has_telemetry) return 1;
     const byName = (a.name || "").localeCompare(b.name || "", undefined, { sensitivity: "base" });
@@ -117,7 +117,7 @@ export default function SatelliteSelector() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-      {/* Filter bar — full width input + telemetry toggle */}
+      {/* Filter bar */}
       <div className="flex items-center" style={{ gap: "12px" }}>
         <input
           type="text"
@@ -140,7 +140,7 @@ export default function SatelliteSelector() {
         />
       </div>
 
-      {/* Table — no outer card or border */}
+      {/* Satellite table */}
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
         <thead>
           <tr
@@ -174,9 +174,6 @@ export default function SatelliteSelector() {
             <th style={{ textAlign: "right", padding: "8px 12px", fontWeight: 500, width: "72px" }}>
               Params
             </th>
-            <th style={{ textAlign: "right", padding: "8px 12px", fontWeight: 500, width: "88px" }}>
-              Anomalies
-            </th>
           </tr>
         </thead>
         <tbody>
@@ -209,7 +206,7 @@ export default function SatelliteSelector() {
                   (e.currentTarget.style.backgroundColor = "transparent")
                 }
               >
-                {/* NORAD ID — monospace blue link */}
+                {/* NORAD ID — monospace blue */}
                 <td
                   className="font-data"
                   style={{ padding: "8px 12px", fontSize: "12px", color: C.blue }}
@@ -217,7 +214,7 @@ export default function SatelliteSelector() {
                   {sat.norad_id}
                 </td>
 
-                {/* NAME — semibold, primary if telemetry, secondary if not */}
+                {/* NAME */}
                 <td
                   style={{
                     padding: "8px 12px",
@@ -246,7 +243,7 @@ export default function SatelliteSelector() {
                   {sat.operator || "—"}
                 </td>
 
-                {/* STATUS — 12px dot */}
+                {/* STATUS dot */}
                 <td style={{ padding: "8px 12px", textAlign: "center" }}>
                   <span
                     style={{
@@ -273,31 +270,17 @@ export default function SatelliteSelector() {
                   {formatUtcTimestamp(sat.fetched_at)}
                 </td>
 
-                {/* PARAMS */}
+                {/* PARAMS — real value for telemetry satellites */}
                 <td
                   className="font-data"
                   style={{
                     padding: "8px 12px",
                     fontSize: "12px",
                     textAlign: "right",
-                    color: C.secondary,
+                    color: sat.has_telemetry ? C.primary : C.secondary,
                   }}
                 >
                   {sat.has_telemetry ? sat.parameter_count : "—"}
-                </td>
-
-                {/* ANOMALIES */}
-                <td
-                  className="font-data"
-                  style={{
-                    padding: "8px 12px",
-                    fontSize: "12px",
-                    textAlign: "right",
-                    color: C.secondary,
-                  }}
-                  title="Available in satellite detail view to reduce API load."
-                >
-                  —
                 </td>
               </tr>
             );
@@ -317,4 +300,3 @@ export default function SatelliteSelector() {
     </div>
   );
 }
-

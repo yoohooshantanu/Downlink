@@ -55,14 +55,20 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Allow CORS for development (Next.js rewrite handles it mostly, but good to have)
+# Allow CORS — lock origins via ALLOWED_ORIGINS env var in production.
+# Accepts a comma-separated list, e.g. "https://downlink.example.com".
+# Falls back to localhost for local development.
+_raw_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000")
+ALLOWED_ORIGINS: list[str] = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 def get_client() -> SatNOGSClient:
     return satnogs_client

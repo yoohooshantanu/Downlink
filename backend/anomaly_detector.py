@@ -8,6 +8,8 @@ parameters and flags readings that deviate beyond a specified threshold.
 import math
 from typing import List, Dict, Any
 
+from utils import flatten_values as _flatten_values
+
 # Threshold for flagging an anomaly (number of standard deviations)
 Z_SCORE_THRESHOLD = 2.5
 
@@ -74,13 +76,4 @@ def detect_anomalies(frames: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     anomalies.sort(key=lambda x: x["timestamp"], reverse=True)
     return anomalies
 
-def _flatten_values(d: Dict, prefix: str = "") -> Dict[str, float]:
-    """Flatten nested dict into {dotted_key: numeric_value} pairs."""
-    result = {}
-    for k, v in d.items():
-        full_key = f"{prefix}.{k}" if prefix else k
-        if isinstance(v, dict):
-            result.update(_flatten_values(v, full_key))
-        elif isinstance(v, (int, float)) and not isinstance(v, bool):
-            result[full_key] = float(v)
-    return result
+# _flatten_values is imported from utils.py

@@ -23,6 +23,8 @@ from typing import Dict, Any, List, Optional, Tuple
 from collections import defaultdict
 from difflib import get_close_matches
 
+from utils import flatten_values as _flatten_values, safe_float as _safe_float
+
 from pydantic import BaseModel, ValidationError
 
 logger = logging.getLogger(__name__)
@@ -126,29 +128,7 @@ else:
     HAS_OPENAI = False
 
 
-def _safe_float(v: Any) -> Optional[float]:
-    try:
-        if isinstance(v, bool):
-            return None
-        f = float(v)
-        if math.isnan(f) or math.isinf(f):
-            return None
-        return f
-    except Exception:
-        return None
-
-
-def _flatten_values(d: Dict[str, Any], prefix: str = "") -> Dict[str, float]:
-    result: Dict[str, float] = {}
-    for k, v in d.items():
-        name = f"{prefix}.{k}" if prefix else k
-        if isinstance(v, dict):
-            result.update(_flatten_values(v, name))
-        else:
-            fv = _safe_float(v)
-            if fv is not None:
-                result[name] = fv
-    return result
+# _safe_float and _flatten_values are imported from utils.py
 
 
 def _parse_iso(ts: str) -> Optional[datetime]:
