@@ -706,6 +706,7 @@ Open `http://localhost:3000`. `/api/*` is proxied to `http://127.0.0.1:8000/*` v
 | `QUERY_RATE_LIMIT` | No | `24` | Max AI queries per window per `ip:norad_id` pair. |
 | `AI_CACHE_TTL_SECONDS` | No | `120` | How long AI responses stay in the in-memory cache. |
 | `AI_CACHE_MAX_ITEMS` | No | `800` | Maximum number of entries in the AI response cache before eviction. |
+| `ALLOWED_ORIGINS` | No | `http://localhost:3000` | Comma-separated list of allowed frontend origins for CORS. |
 
 ---
 
@@ -716,10 +717,6 @@ Open `http://localhost:3000`. `/api/*` is proxied to `http://127.0.0.1:8000/*` v
 **Rate limiter is in-process.** The AI query sliding window lives in a `defaultdict` in memory. It resets on restart and doesn't carry over across multiple workers.
 
 **SQLite under concurrency.** `aiosqlite` serializes writes through an async queue — fine for one user, a bottleneck under real concurrent load.
-
-**No automated test suite.** `test_api.py` and `test_client.py` are manual smoke scripts, not CI tests.
-
-**CORS is open.** `allow_origins=["*"]` — fine locally, needs tightening before any public deployment.
 
 **No auth layer.** The Next.js proxy is the only thing between the browser and FastAPI.
 
