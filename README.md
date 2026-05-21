@@ -46,31 +46,31 @@ The frontend is a Next.js app: a satellite catalog, a detail page per satellite 
 ## Architecture
 
 ```mermaid
-graph TD
+flowchart TD
     subgraph Browser
-        A[Next.js Frontend<br/>React 19 · TypeScript · Recharts]
+        A["Next.js Frontend: React 19, TypeScript, Recharts"]
     end
 
     subgraph Next_Server["Next.js Server (port 3000)"]
-        B[/api/* rewrite proxy/]
+        B["/api/* rewrite proxy"]
     end
 
     subgraph FastAPI_Backend["FastAPI Backend (port 8000)"]
-        C["main.py<br/>Route handlers · Rate limiter"]
-        D["satnogs_client.py<br/>HTTP + SQLite cache"]
-        E["anomaly_detector.py<br/>Z-score engine"]
-        F["trend_analyzer.py<br/>Percent-change engine"]
-        G["ai_engine.py<br/>Intent -> LLM -> Schema validation"]
+        C["main.py: Route handlers, Rate limiter"]
+        D["satnogs_client.py: HTTP + SQLite cache"]
+        E["anomaly_detector.py: Z-score engine"]
+        F["trend_analyzer.py: Percent-change engine"]
+        G["ai_engine.py: Intent -> LLM -> Schema validation"]
     end
 
     subgraph External
-        H[(SatNOGS DB API<br/>db.satnogs.org)]
-        I[(SatNOGS Network API<br/>network.satnogs.org)]
-        J[(Azure OpenAI)]
+        H[("SatNOGS DB API")]
+        I[("SatNOGS Network API")]
+        J[("Azure OpenAI")]
     end
 
     subgraph Local_Storage["Local Storage"]
-        K[(SQLite cache.db)]
+        K[("SQLite cache.db")]
     end
 
     A -->|fetch /api/*| B
@@ -182,6 +182,9 @@ erDiagram
         TEXT end_time
         REAL fetched_at
     }
+    
+    satellites ||--o{ telemetry : contains
+    satellites ||--o{ observations : tracked_by
 ```
 
 **Cache TTLs:**
@@ -227,13 +230,13 @@ When the API is rate-limited or unavailable, `_generate_simulated_payload()` gen
 **Subsystems modeled:**
 
 ```mermaid
-graph LR
-    OT["Orbital Phase<br/>w = 2pi / period_s"] --> IL["Illumination<br/>sunlit in 0..1"]
-    IL --> EPS["Power Subsystem<br/>solar_current * battery_v"]
-    IL --> TH["Thermal<br/>eps_temp * cpu_temp"]
-    EPS --> RF["RF / TX<br/>tx_power * rssi"]
+flowchart LR
+    OT["Orbital Phase: w = 2pi / period_s"] --> IL["Illumination: sunlit in 0..1"]
+    IL --> EPS["Power Subsystem: solar_current * battery_v"]
+    IL --> TH["Thermal: eps_temp * cpu_temp"]
+    EPS --> RF["RF / TX: tx_power * rssi"]
     TH --> RF
-    AG["Aging Factor<br/>years since 2020"] --> EPS
+    AG["Aging Factor: years since 2020"] --> EPS
 ```
 
 **Orbital mechanics (simplified):**
@@ -283,10 +286,10 @@ if battery_v < 7.55: tx_power −= (7.55 − battery_v) × 0.35 (max −0.28 W)
 
 ```mermaid
 flowchart LR
-    A["walk backwards from now"] --> B{"in_pass?<br/>visibility > 0.28"}
-    B -->|yes| C["dense: 45-110 s steps<br/>emit frame"]
-    B -->|no| D{"housekeeping<br/>window?"}
-    D -->|yes every 4h| E["sparse: 240-720 s steps<br/>emit frame"]
+    A["walk backwards from now"] --> B{"in_pass? visibility > 0.28"}
+    B -->|yes| C["dense: 45-110 s steps, emit frame"]
+    B -->|no| D{"housekeeping window?"}
+    D -->|yes every 4h| E["sparse: 240-720 s steps, emit frame"]
     D -->|no| F["skip, advance"]
 ```
 
@@ -359,19 +362,19 @@ LLM calls are optional. Without Azure OpenAI credentials the engine returns dete
 
 ```mermaid
 flowchart TD
-    Q["User query string"] --> N["Normalize + redact<br/>strip PII, truncate to 300 chars"]
-    N --> PR["Parameter resolution<br/>alias table -> fuzzy match -> token overlap"]
-    PR --> HE["Hour extraction<br/>regex for 'last 6 hours', 'today', 'this week'"]
-    HE --> CC["Compute context<br/>per-param stats from telemetry frames"]
-    CC --> IC["Intent classify<br/>deterministic keyword match first"]
-    IC -->|if LLM available| IL["LLM intent call<br/>INTENT_MODEL, temp=0, max 1 attempt"]
-    IL --> DF["Deterministic findings<br/>pull stats from context dict"]
+    Q["User query string"] --> N["Normalize + redact: strip PII, truncate to 300 chars"]
+    N --> PR["Parameter resolution: alias table -> fuzzy match -> token overlap"]
+    PR --> HE["Hour extraction: regex for 'last 6 hours', 'today', 'this week'"]
+    HE --> CC["Compute context: per-param stats from telemetry frames"]
+    CC --> IC["Intent classify: deterministic keyword match first"]
+    IC -->|if LLM available| IL["LLM intent call: INTENT_MODEL, temp=0, max 1 attempt"]
+    IL --> DF["Deterministic findings: pull stats from context dict"]
     IC --> DF
-    DF --> CK{"Cache hit?<br/>key: norad:query:data_hash:prompt_ver"}
+    DF --> CK{"Cache hit? key: norad:query:data_hash:prompt_ver"}
     CK -->|yes| RET["Return cached"]
     CK -->|no LLM| TF["Template response"]
-    CK -->|LLM available| LS["LLM synthesis call<br/>SYNTHESIS_MODEL, temp=0.25, max 2 attempts"]
-    LS -->|validate| PV["Pydantic schema check<br/>QueryLLMResponse"]
+    CK -->|LLM available| LS["LLM synthesis call: SYNTHESIS_MODEL, temp=0.25, max 2 attempts"]
+    LS -->|validate| PV["Pydantic schema check: QueryLLMResponse"]
     PV -->|pass| CACHE["Store in _QUERY_CACHE"]
     PV -->|fail| TF
     TF --> CACHE
@@ -492,14 +495,14 @@ FastAPI runs on port 8000. The Next.js config proxies `/api/*` → `http://127.0
 All components are in `src/components/`. The satellite detail page is `src/app/satellite/[norad_id]/`.
 
 ```mermaid
-graph TD
-    Page["page.tsx<br/>satellite detail route"]
-    SS[SatelliteSelector]
-    TC[TelemetryChart]
-    AP[AnomalyPanel]
-    PT[PassTimeline]
-    PSC[PassSummaryCard]
-    AQ[AIQueryBox]
+flowchart TD
+    Page["page.tsx: satellite detail route"]
+    SS["SatelliteSelector"]
+    TC["TelemetryChart"]
+    AP["AnomalyPanel"]
+    PT["PassTimeline"]
+    PSC["PassSummaryCard"]
+    AQ["AIQueryBox"]
 
     Page --> SS
     Page --> TC
@@ -531,7 +534,7 @@ flowchart LR
     REQ["POST /query"] --> KEY["key = ip:norad_id"]
     KEY --> CLEAN["Pop timestamps older than window_s"]
     CLEAN --> CHECK{"len queue >= limit?"}
-    CHECK -->|yes| R429["HTTP 429<br/>Too many AI queries"]
+    CHECK -->|yes| R429["HTTP 429: Too many AI queries"]
     CHECK -->|no| PUSH["Append now, continue"]
 ```
 
