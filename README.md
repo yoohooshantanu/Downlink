@@ -56,11 +56,11 @@ graph TD
     end
 
     subgraph FastAPI_Backend["FastAPI Backend (port 8000)"]
-        C[main.py<br/>Route handlers · Rate limiter]
-        D[satnogs_client.py<br/>HTTP + SQLite cache]
-        E[anomaly_detector.py<br/>Z-score engine]
-        F[trend_analyzer.py<br/>Percent-change engine]
-        G[ai_engine.py<br/>Intent → LLM → Schema validation]
+        C["main.py<br/>Route handlers · Rate limiter"]
+        D["satnogs_client.py<br/>HTTP + SQLite cache"]
+        E["anomaly_detector.py<br/>Z-score engine"]
+        F["trend_analyzer.py<br/>Percent-change engine"]
+        G["ai_engine.py<br/>Intent -> LLM -> Schema validation"]
     end
 
     subgraph External
@@ -94,38 +94,39 @@ graph TD
 ```mermaid
 sequenceDiagram
     participant UI as Next.js UI
-    participant API as FastAPI /telemetry
-    participant Cache as SQLite cache.db
-    participant SatNOGS as SatNOGS DB API
+    participant API as FastAPI
+    participant Cache as SQLite
+    participant SatNOGS as SatNOGS DB
 
-    UI->>API: GET /satellites/{norad_id}/telemetry?parameter=battery_voltage&last_n=100
-    API->>Cache: SELECT WHERE key='telemetry_v2_{norad_id}' AND age < 3600s
+    UI->>API: GET /satellites/{id}/telemetry
+    API->>Cache: SELECT WHERE key='telemetry_v2_{id}' AND age < 3600s
     alt Cache hit
         Cache-->>API: JSON frames
     else Cache miss
-        API->>SatNOGS: GET /telemetry/?satellite={norad_id}
-        SatNOGS-->>API: decoded frames[]
+        API->>SatNOGS: GET /telemetry/?satellite={id}
+        SatNOGS-->>API: decoded frames array
         API->>Cache: INSERT OR REPLACE
     end
-    API->>API: flatten nested decoded dicts → {param: value}
+    API->>API: flatten nested decoded dicts -> {param: value}
     API->>API: filter by parameter name, sort descending, take last_n
-    API-->>UI: {values: [...], is_simulated: false}
+    API-->>UI: {values: array, is_simulated: false}
 ```
 
 ### Telemetry request (rate-limited fallback)
 
 ```mermaid
 sequenceDiagram
+    participant UI as Next.js UI
     participant API as FastAPI
-    participant SatNOGS as SatNOGS DB API
-    participant Sim as Synthetic Simulator
+    participant SatNOGS as SatNOGS DB
+    participant Sim as Simulator
 
     API->>SatNOGS: GET /telemetry/
     SatNOGS-->>API: HTTP 429 + Retry-After header
     API->>API: set _telemetry_backoff_until = now + Retry-After (max 8s)
     API->>Sim: _generate_synthetic_frames(norad_id, limit)
     Sim-->>API: frames with _simulated=True
-    API-->>UI: {values: [...], is_simulated: true}
+    API-->>UI: {values: array, is_simulated: true}
 ```
 
 ---
@@ -227,12 +228,12 @@ When the API is rate-limited or unavailable, `_generate_simulated_payload()` gen
 
 ```mermaid
 graph LR
-    OT[Orbital Phase<br/>ω = 2π / period_s] --> IL[Illumination<br/>sunlit ∈ 0..1]
-    IL --> EPS[Power Subsystem<br/>solar_current · battery_v]
-    IL --> TH[Thermal<br/>eps_temp · cpu_temp]
-    EPS --> RF[RF / TX<br/>tx_power · rssi]
+    OT["Orbital Phase<br/>w = 2pi / period_s"] --> IL["Illumination<br/>sunlit in 0..1"]
+    IL --> EPS["Power Subsystem<br/>solar_current * battery_v"]
+    IL --> TH["Thermal<br/>eps_temp * cpu_temp"]
+    EPS --> RF["RF / TX<br/>tx_power * rssi"]
     TH --> RF
-    AG[Aging Factor<br/>years since 2020] --> EPS
+    AG["Aging Factor<br/>years since 2020"] --> EPS
 ```
 
 **Orbital mechanics (simplified):**
@@ -282,11 +283,11 @@ if battery_v < 7.55: tx_power −= (7.55 − battery_v) × 0.35 (max −0.28 W)
 
 ```mermaid
 flowchart LR
-    A[walk backwards from now] --> B{in_pass?<br/>visibility > 0.28}
-    B -->|yes| C[dense: 45–110 s steps<br/>emit frame]
-    B -->|no| D{housekeeping<br/>window?}
-    D -->|yes every 4h| E[sparse: 240–720 s steps<br/>emit frame]
-    D -->|no| F[skip, advance]
+    A["walk backwards from now"] --> B{"in_pass?<br/>visibility > 0.28"}
+    B -->|yes| C["dense: 45-110 s steps<br/>emit frame"]
+    B -->|no| D{"housekeeping<br/>window?"}
+    D -->|yes every 4h| E["sparse: 240-720 s steps<br/>emit frame"]
+    D -->|no| F["skip, advance"]
 ```
 
 The chart shows a `⚠ Simulator Active` banner when any frame in the response has `_simulated: true`.
@@ -358,20 +359,20 @@ LLM calls are optional. Without Azure OpenAI credentials the engine returns dete
 
 ```mermaid
 flowchart TD
-    Q[User query string] --> N[Normalize + redact<br/>strip PII, truncate to 300 chars]
-    N --> PR[Parameter resolution<br/>alias table → fuzzy match → token overlap]
-    PR --> HE[Hour extraction<br/>regex for 'last 6 hours', 'today', 'this week']
-    HE --> CC[Compute context<br/>per-param stats from telemetry frames]
-    CC --> IC[Intent classify<br/>deterministic keyword match first]
-    IC -->|if LLM available| IL[LLM intent call<br/>INTENT_MODEL, temp=0, max 1 attempt]
-    IL --> DF[Deterministic findings<br/>pull stats from context dict]
+    Q["User query string"] --> N["Normalize + redact<br/>strip PII, truncate to 300 chars"]
+    N --> PR["Parameter resolution<br/>alias table -> fuzzy match -> token overlap"]
+    PR --> HE["Hour extraction<br/>regex for 'last 6 hours', 'today', 'this week'"]
+    HE --> CC["Compute context<br/>per-param stats from telemetry frames"]
+    CC --> IC["Intent classify<br/>deterministic keyword match first"]
+    IC -->|if LLM available| IL["LLM intent call<br/>INTENT_MODEL, temp=0, max 1 attempt"]
+    IL --> DF["Deterministic findings<br/>pull stats from context dict"]
     IC --> DF
-    DF --> CK{Cache hit?<br/>key: norad:query:data_hash:prompt_ver}
-    CK -->|yes| RET[Return cached]
-    CK -->|no LLM| TF[Template response]
-    CK -->|LLM available| LS[LLM synthesis call<br/>SYNTHESIS_MODEL, temp=0.25, max 2 attempts]
-    LS -->|validate| PV[Pydantic schema check<br/>QueryLLMResponse]
-    PV -->|pass| CACHE[Store in _QUERY_CACHE]
+    DF --> CK{"Cache hit?<br/>key: norad:query:data_hash:prompt_ver"}
+    CK -->|yes| RET["Return cached"]
+    CK -->|no LLM| TF["Template response"]
+    CK -->|LLM available| LS["LLM synthesis call<br/>SYNTHESIS_MODEL, temp=0.25, max 2 attempts"]
+    LS -->|validate| PV["Pydantic schema check<br/>QueryLLMResponse"]
+    PV -->|pass| CACHE["Store in _QUERY_CACHE"]
     PV -->|fail| TF
     TF --> CACHE
     CACHE --> RET
@@ -527,11 +528,11 @@ graph TD
 
 ```mermaid
 flowchart LR
-    REQ[POST /query] --> KEY["key = ip:norad_id"]
-    KEY --> CLEAN[Pop timestamps older than window_s]
-    CLEAN --> CHECK{len queue >= limit?}
-    CHECK -->|yes| R429[HTTP 429<br/>Too many AI queries]
-    CHECK -->|no| PUSH[Append now, continue]
+    REQ["POST /query"] --> KEY["key = ip:norad_id"]
+    KEY --> CLEAN["Pop timestamps older than window_s"]
+    CLEAN --> CHECK{"len queue >= limit?"}
+    CHECK -->|yes| R429["HTTP 429<br/>Too many AI queries"]
+    CHECK -->|no| PUSH["Append now, continue"]
 ```
 
 Defaults (overridable via env):
